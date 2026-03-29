@@ -84,6 +84,12 @@ if("usb_host_hid" IN_LIST build_components)
     list(APPEND ADD_SRCS "${PORT_PATH}/esp_lvgl_port_usbhid.c" "images/${PORT_FOLDER}/img_cursor.c")
     list(APPEND ADD_LIBS idf::usb_host_hid)
 endif()
+if("esp_lcd_buffered" IN_LIST build_components)
+    list(APPEND ADD_LIBS idf::esp_lcd_buffered)
+endif()
+if("trigger239__esp_lcd_buffered" IN_LIST build_components)
+    list(APPEND ADD_LIBS idf::trigger239__esp_lcd_buffered)
+endif()
 
 # Include SIMD assembly source code for rendering, only for (9.1.0 <= LVG_version < 9.2.0) and only for esp32 and esp32s3
 if((lvgl_ver VERSION_GREATER_EQUAL "9.1.0") AND (lvgl_ver VERSION_LESS "9.2.0"))

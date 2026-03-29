@@ -79,6 +79,11 @@ typedef struct {
 static lv_display_t *lvgl_port_add_disp_priv(const lvgl_port_display_cfg_t *disp_cfg, const lvgl_port_disp_priv_cfg_t *priv_cfg);
 #if LVGL_PORT_HANDLE_FLUSH_READY
 static bool lvgl_port_flush_io_ready_callback(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel_io_event_data_t *edata, void *user_ctx);
+#if ESP_LVGL_PORT_USE_LCD_BUFFERED
+static void lvgl_port_flush_buffered_ready_callback(esp_lcd_panel_handle_t panel,
+        esp_lcd_buffered_panel_event_data_t *edata,
+        void *user_ctx);
+#endif
 #if CONFIG_IDF_TARGET_ESP32S3 && ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 0, 0)
 static bool lvgl_port_flush_rgb_vsync_ready_callback(esp_lcd_panel_handle_t panel_io, const esp_lcd_rgb_panel_event_data_t *edata, void *user_ctx);
 #endif
@@ -224,6 +229,51 @@ lv_display_t *lvgl_port_add_disp_rgb(const lvgl_port_display_cfg_t *disp_cfg, co
     return disp;
 }
 
+#if ESP_LVGL_PORT_USE_LCD_BUFFERED
+lv_display_t *lvgl_port_add_disp_buffered(const lvgl_port_display_cfg_t *disp_cfg,
+        const lvgl_port_display_buffered_cfg_t *buffered_cfg)
+{
+    assert(buffered_cfg != NULL);
+    const lvgl_port_disp_priv_cfg_t priv_cfg = {
+#if LVGL_PORT_HANDLE_FLUSH_READY
+        .use_flush_smphr = 1, /* Always use semaphore for now */
+#else
+        .use_flush_smphr = 0, /* Don't need semaphore if not handling flush ready */
+#endif
+    };
+    lvgl_port_lock(0);
+    lv_disp_t *disp = lvgl_port_add_disp_priv(disp_cfg, &priv_cfg);
+
+    if (disp != NULL) {
+        lvgl_port_display_ctx_t *disp_ctx = (lvgl_port_display_ctx_t *)lv_display_get_driver_data(disp);
+        /* Set display type */
+        disp_ctx->disp_type = LVGL_PORT_DISP_TYPE_OTHER;
+
+        assert(disp_cfg->io_handle != NULL);
+
+#if LVGL_PORT_HANDLE_FLUSH_READY
+        const esp_lcd_buffered_panel_event_callbacks_t cbs = {
+            .wait_sync = buffered_cfg->wait_sync,
+            .on_color_trans_done = lvgl_port_flush_buffered_ready_callback,
+        };
+        /* Register done callback */
+        esp_lcd_buffered_panel_register_event_callbacks(disp_ctx->panel_handle, &cbs, disp);
+
+        /* Register wait callback if using semaphore */
+        if (disp_ctx->flush_smphr) {
+            lv_display_set_flush_wait_cb(disp, lvgl_port_flush_wait_smphr_callback);
+        }
+#endif
+
+        /* Apply rotation from initial display configuration */
+        lvgl_port_disp_rotation_update(disp_ctx);
+    }
+    lvgl_port_unlock();
+
+    return disp;
+}
+#endif
+
 esp_err_t lvgl_port_remove_disp(lv_display_t *disp)
 {
     assert(disp);
@@ -256,6 +306,7 @@ esp_err_t lvgl_port_remove_disp(lv_display_t *disp)
     if (disp_ctx->flush_smphr) {
         vSemaphoreDelete(disp_ctx->flush_smphr);
     }
+
 #if LVGL_PORT_PPA
     if (disp_ctx->ppa_handle) {
         lvgl_port_ppa_delete(disp_ctx->ppa_handle);
@@ -482,13 +533,12 @@ err:
 }
 
 #if LVGL_PORT_HANDLE_FLUSH_READY
-static bool lvgl_port_flush_io_ready_callback(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel_io_event_data_t *edata, void *user_ctx)
+static bool lvgl_port_flush_common_ready_callback(lv_display_t *disp_drv)
 {
     BaseType_t need_yield = pdFALSE;
 
-    lv_display_t *disp_drv = (lv_display_t *)user_ctx;
     assert(disp_drv != NULL);
-    lvgl_port_display_ctx_t *disp_ctx = lv_display_get_user_data(disp_drv);
+    lvgl_port_display_ctx_t *disp_ctx = lv_display_get_driver_data(disp_drv);
     assert(disp_ctx != NULL);
 
     if (disp_ctx->flush_smphr) {
@@ -504,27 +554,27 @@ static bool lvgl_port_flush_io_ready_callback(esp_lcd_panel_io_handle_t panel_io
     return (need_yield == pdTRUE);
 }
 
+static bool lvgl_port_flush_io_ready_callback(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel_io_event_data_t *edata, void *user_ctx)
+{
+    lv_display_t *disp_drv = (lv_display_t *)user_ctx;
+    return lvgl_port_flush_common_ready_callback(disp_drv);
+}
+
+#if ESP_LVGL_PORT_USE_LCD_BUFFERED
+static void lvgl_port_flush_buffered_ready_callback(esp_lcd_panel_handle_t panel,
+        esp_lcd_buffered_panel_event_data_t *edata,
+        void *user_ctx)
+{
+    lv_display_t *disp_drv = (lv_display_t *)user_ctx;
+    lvgl_port_flush_common_ready_callback(disp_drv);
+}
+#endif
+
 #if (CONFIG_IDF_TARGET_ESP32P4 && ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 3, 0))
 static bool lvgl_port_flush_dpi_panel_ready_callback(esp_lcd_panel_handle_t panel_io, esp_lcd_dpi_panel_event_data_t *edata, void *user_ctx)
 {
-    BaseType_t need_yield = pdFALSE;
-
     lv_display_t *disp_drv = (lv_display_t *)user_ctx;
-    assert(disp_drv != NULL);
-    lvgl_port_display_ctx_t *disp_ctx = lv_display_get_user_data(disp_drv);
-    assert(disp_ctx != NULL);
-
-    if (disp_ctx->flush_smphr) {
-        if (xPortInIsrContext() == pdTRUE) {
-            need_yield = xSemaphoreGiveFromISR(disp_ctx->flush_smphr, &need_yield);
-        } else {
-            xSemaphoreGive(disp_ctx->flush_smphr);
-        }
-    } else {
-        lv_disp_flush_ready(disp_drv);
-    }
-
-    return (need_yield == pdTRUE);
+    return lvgl_port_flush_common_ready_callback(disp_drv);
 }
 
 static bool lvgl_port_flush_dpi_vsync_ready_callback(esp_lcd_panel_handle_t panel_io, esp_lcd_dpi_panel_event_data_t *edata, void *user_ctx)

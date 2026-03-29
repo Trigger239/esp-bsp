@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2024 Espressif Systems (Shanghai) CO LTD
+ * SPDX-FileCopyrightText: 2024-2026 Espressif Systems (Shanghai) CO LTD
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -18,6 +18,11 @@
 
 #if LVGL_VERSION_MAJOR == 8
 #include "esp_lvgl_port_compatibility.h"
+#endif
+
+#if __has_include ("esp_lcd_panel_buffered.h")
+#include "esp_lcd_panel_buffered.h"
+#define ESP_LVGL_PORT_USE_LCD_BUFFERED 1
 #endif
 
 #ifdef __cplusplus
@@ -85,6 +90,15 @@ typedef struct {
     } flags;
 } lvgl_port_display_dsi_cfg_t;
 
+#if ESP_LVGL_PORT_USE_LCD_BUFFERED
+/**
+ * @brief Configuration Buffered display structure
+ */
+typedef struct {
+    esp_lcd_buffered_panel_sync_wait_cb_t wait_sync; /*!< Sync Wait callback function (use to avoid tearing) */
+} lvgl_port_display_buffered_cfg_t;
+#endif
+
 /**
  * @brief Add I2C/SPI/I8080 display handling to LVGL
  *
@@ -116,6 +130,20 @@ lv_display_t *lvgl_port_add_disp_dsi(const lvgl_port_display_cfg_t *disp_cfg, co
  * @return Pointer to LVGL display or NULL when error occurred
  */
 lv_display_t *lvgl_port_add_disp_rgb(const lvgl_port_display_cfg_t *disp_cfg, const lvgl_port_display_rgb_cfg_t *rgb_cfg);
+
+#if ESP_LVGL_PORT_USE_LCD_BUFFERED
+/**
+ * @brief Add Buffered display handling to LVGL
+ *
+ * @note Allocated memory in this function is not free in deinit. You must call lvgl_port_remove_disp for free all memory!
+ *
+ * @param disp_cfg Display configuration structure
+ * @param buffered_cfg Buffered display specific configuration structure
+ * @return Pointer to LVGL display or NULL when error occurred
+ */
+lv_display_t *lvgl_port_add_disp_buffered(const lvgl_port_display_cfg_t *disp_cfg,
+        const lvgl_port_display_buffered_cfg_t *buffered_cfg);
+#endif
 
 /**
  * @brief Remove display handling from LVGL
