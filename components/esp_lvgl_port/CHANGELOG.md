@@ -6,6 +6,9 @@
 - Added display flush wait callback support
 - Added support for buffered LCD panel (esp_lcd_buffered)
 
+### Fixes
+- Fixed LVGL9 task delay calculation
+
 ## 2.9.0
 
 ### Features

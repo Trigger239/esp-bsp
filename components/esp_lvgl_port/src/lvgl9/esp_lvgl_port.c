@@ -249,8 +249,14 @@ static void lvgl_port_task(void *arg)
             task_delay_ms = lvgl_port_ctx.task_max_sleep_ms;
         }
 
-        /* Minimal dealy for the task. When there is too much events, it takes time for other tasks and interrupts. */
+        /* Minimal delay for the task. When there is too much events, it takes time for other tasks and interrupts. */
         vTaskDelay(1);
+        /* Adjust delay value returned by lv_timer_handler() accordingly */
+        if (task_delay_ms >= portTICK_PERIOD_MS) {
+            task_delay_ms -= portTICK_PERIOD_MS;
+        } else {
+            task_delay_ms = 0;
+        }
     }
 
     ESP_LOGI(TAG, "Stopped LVGL task");
