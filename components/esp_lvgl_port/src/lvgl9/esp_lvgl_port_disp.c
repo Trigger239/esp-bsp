@@ -65,6 +65,7 @@ typedef struct {
     uint8_t                   *oled_buffer;
     lv_display_t              *disp_drv;      /* LVGL display driver */
     lv_display_rotation_t     current_rotation;
+    SemaphoreHandle_t         flush_smphr;    /* LCD panel Flush Done semaphore (NULL if lv_disp_flush_ready() is used) */
     SemaphoreHandle_t         trans_sem;      /* Idle transfer mutex */
     lvgl_port_rounder_cb_t    rounder_cb;     /* Rounder callback for display area */
 #if LVGL_PORT_PPA
@@ -97,6 +98,7 @@ static bool lvgl_port_flush_dpi_panel_ready_callback(esp_lcd_panel_handle_t pane
 static bool lvgl_port_flush_dpi_vsync_ready_callback(esp_lcd_panel_handle_t panel_io,
         esp_lcd_dpi_panel_event_data_t *edata, void *user_ctx);
 #endif
+static void lvgl_port_flush_wait_smphr_callback(lv_display_t *drv);
 #endif
 static void lvgl_port_flush_callback(lv_display_t *drv, const lv_area_t *area, uint8_t *color_map);
 static void lvgl_port_disp_size_update_callback(lv_event_t *e);
@@ -110,7 +112,14 @@ static void lvgl_port_display_invalidate_callback(lv_event_t *e);
 lv_display_t *lvgl_port_add_disp(const lvgl_port_display_cfg_t *disp_cfg)
 {
     lvgl_port_lock(0);
-    lv_disp_t *disp = lvgl_port_add_disp_priv(disp_cfg, NULL);
+    const lvgl_port_disp_priv_cfg_t priv_cfg = {
+#if LVGL_PORT_HANDLE_FLUSH_READY
+        .use_flush_smphr = 1, /* Always use semaphore for now */
+#else
+        .use_flush_smphr = 0, /* Don't need semaphore if not handling flush ready */
+#endif
+    };
+    lv_disp_t *disp = lvgl_port_add_disp_priv(disp_cfg, &priv_cfg);
 
     if (disp != NULL) {
         lvgl_port_display_ctx_t *disp_ctx = (lvgl_port_display_ctx_t *)lv_display_get_driver_data(disp);
@@ -125,6 +134,11 @@ lv_display_t *lvgl_port_add_disp(const lvgl_port_display_cfg_t *disp_cfg)
         };
         /* Register done callback */
         esp_lcd_panel_io_register_event_callbacks(disp_ctx->io_handle, &cbs, disp);
+
+        /* Register wait callback if using semaphore */
+        if (disp_ctx->flush_smphr) {
+            lv_display_set_flush_wait_cb(disp, lvgl_port_flush_wait_smphr_callback);
+        }
 #endif
 
         /* Apply rotation from initial display configuration */
@@ -144,6 +158,7 @@ lv_display_t *lvgl_port_add_disp_dsi(const lvgl_port_display_cfg_t *disp_cfg,
     const lvgl_port_disp_priv_cfg_t priv_cfg = {
         .disp_type = LVGL_PORT_DISP_TYPE_DSI,
         .avoid_tearing = dsi_cfg->flags.avoid_tearing,
+        .use_flush_smphr = 1, /* Always use semaphore for now */
     };
     lvgl_port_lock(0);
     lv_disp_t *disp = lvgl_port_add_disp_priv(disp_cfg, &priv_cfg);
@@ -166,6 +181,11 @@ lv_display_t *lvgl_port_add_disp_dsi(const lvgl_port_display_cfg_t *disp_cfg,
         }
         /* Register done callback */
         esp_lcd_dpi_panel_register_event_callbacks(disp_ctx->panel_handle, &cbs, disp);
+
+        /* Register wait callback if using semaphore */
+        if (disp_ctx->flush_smphr) {
+            lv_display_set_flush_wait_cb(disp, lvgl_port_flush_wait_smphr_callback);
+        }
 
         /* Apply rotation from initial display configuration */
         lvgl_port_disp_rotation_update(disp_ctx);
@@ -258,6 +278,10 @@ esp_err_t lvgl_port_remove_disp(lv_display_t *disp)
     if (disp_ctx->trans_sem) {
         vSemaphoreDelete(disp_ctx->trans_sem);
     }
+
+    if (disp_ctx->flush_smphr) {
+        vSemaphoreDelete(disp_ctx->flush_smphr);
+    }
 #if LVGL_PORT_PPA
     if (disp_ctx->ppa_handle) {
         lvgl_port_ppa_delete(disp_ctx->ppa_handle);
@@ -288,6 +312,7 @@ static lv_display_t *lvgl_port_add_disp_priv(const lvgl_port_display_cfg_t *disp
     lv_color_t *buf2 = NULL;
     uint32_t buffer_size = 0;
     SemaphoreHandle_t trans_sem = NULL;
+    SemaphoreHandle_t flush_sem = NULL;
     assert(disp_cfg != NULL);
     assert(disp_cfg->panel_handle != NULL);
     assert(disp_cfg->buffer_size > 0);
@@ -304,7 +329,7 @@ static lv_display_t *lvgl_port_add_disp_priv(const lvgl_port_display_cfg_t *disp
                         || disp_cfg->color_format == LV_COLOR_FORMAT_I1, NULL, TAG, "Not supported display color format!");
 
     lv_color_format_t display_color_format = (disp_cfg->color_format != 0 ? disp_cfg->color_format :
-            LV_COLOR_FORMAT_RGB565);
+        LV_COLOR_FORMAT_RGB565);
     uint8_t color_bytes = lv_color_format_get_size(display_color_format);
     if (disp_cfg->flags.swap_bytes) {
         /* Swap bytes can be used only in RGB565 color format */
@@ -391,6 +416,13 @@ static lv_display_t *lvgl_port_add_disp_priv(const lvgl_port_display_cfg_t *disp
 
         disp_ctx->draw_buffs[0] = buf1;
         disp_ctx->draw_buffs[1] = buf2;
+    }
+
+    /* Use semaphore to signal LCD panel flush done */
+    if (priv_cfg && priv_cfg->use_flush_smphr) {
+        flush_sem = xSemaphoreCreateBinary();
+        ESP_GOTO_ON_FALSE(flush_sem, ESP_ERR_NO_MEM, err, TAG, "Failed to create flush Semaphore");
+        disp_ctx->flush_smphr = flush_sem;
     }
 
     disp = lv_display_create(disp_cfg->hres, disp_cfg->vres);
@@ -499,6 +531,9 @@ err:
         if (trans_sem) {
             vSemaphoreDelete(trans_sem);
         }
+        if (flush_sem) {
+            vSemaphoreDelete(flush_sem);
+        }
     }
 
     return disp;
@@ -508,20 +543,48 @@ err:
 static bool lvgl_port_flush_io_ready_callback(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel_io_event_data_t *edata,
         void *user_ctx)
 {
+    BaseType_t need_yield = pdFALSE;
+
     lv_display_t *disp_drv = (lv_display_t *)user_ctx;
     assert(disp_drv != NULL);
-    lv_disp_flush_ready(disp_drv);
-    return false;
+    lvgl_port_display_ctx_t *disp_ctx = lv_display_get_user_data(disp_drv);
+    assert(disp_ctx != NULL);
+
+    if (disp_ctx->flush_smphr) {
+        if (xPortInIsrContext() == pdTRUE) {
+            need_yield = xSemaphoreGiveFromISR(disp_ctx->flush_smphr, &need_yield);
+        } else {
+            xSemaphoreGive(disp_ctx->flush_smphr);
+        }
+    } else {
+        lv_disp_flush_ready(disp_drv);
+    }
+
+    return (need_yield == pdTRUE);
 }
 
 #if (SOC_MIPI_DSI_SUPPORTED && ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 3, 0))
 static bool lvgl_port_flush_dpi_panel_ready_callback(esp_lcd_panel_handle_t panel_io,
         esp_lcd_dpi_panel_event_data_t *edata, void *user_ctx)
 {
+    BaseType_t need_yield = pdFALSE;
+
     lv_display_t *disp_drv = (lv_display_t *)user_ctx;
     assert(disp_drv != NULL);
-    lv_disp_flush_ready(disp_drv);
-    return false;
+    lvgl_port_display_ctx_t *disp_ctx = lv_display_get_user_data(disp_drv);
+    assert(disp_ctx != NULL);
+
+    if (disp_ctx->flush_smphr) {
+        if (xPortInIsrContext() == pdTRUE) {
+            need_yield = xSemaphoreGiveFromISR(disp_ctx->flush_smphr, &need_yield);
+        } else {
+            xSemaphoreGive(disp_ctx->flush_smphr);
+        }
+    } else {
+        lv_disp_flush_ready(disp_drv);
+    }
+
+    return (need_yield == pdTRUE);
 }
 
 static bool lvgl_port_flush_dpi_vsync_ready_callback(esp_lcd_panel_handle_t panel_io,
@@ -563,6 +626,16 @@ static LVGL_PORT_IRAM bool lvgl_port_flush_rgb_vsync_ready_callback(esp_lcd_pane
     return (need_yield == pdTRUE);
 }
 #endif
+
+static void lvgl_port_flush_wait_smphr_callback(lv_display_t *drv)
+{
+    assert(drv != NULL);
+
+    lvgl_port_display_ctx_t *disp_ctx = lv_display_get_driver_data(drv);
+    assert(disp_ctx != NULL);
+    assert(disp_ctx->flush_smphr != NULL); /* This callback should only be used with semaphore */
+    xSemaphoreTake(disp_ctx->flush_smphr, portMAX_DELAY);
+}
 #endif
 
 static void _lvgl_port_transform_monochrome(lv_display_t *display, const lv_area_t *area, uint8_t **color_map)

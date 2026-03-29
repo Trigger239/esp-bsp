@@ -1,5 +1,10 @@
 # Changelog
 
+## [Unreleased]
+
+### Features
+- Added display flush wait callback support
+
 ## 2.9.0
 
 ### Features
