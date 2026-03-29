@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2024 Espressif Systems (Shanghai) CO LTD
+ * SPDX-FileCopyrightText: 2024-2026 Espressif Systems (Shanghai) CO LTD
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -43,6 +43,7 @@ typedef struct {
     esp_lcd_panel_io_handle_t io_handle;      /* LCD panel IO handle */
     esp_lcd_panel_handle_t    panel_handle;   /* LCD panel handle */
     esp_lcd_panel_handle_t    control_handle; /* LCD panel control handle */
+    SemaphoreHandle_t         flush_smphr;    /* LCD panel Flush Done semaphore (NULL if lv_disp_flush_ready() is used) */
     lvgl_port_rotation_cfg_t  rotation;       /* Default values of the screen rotation */
     lv_color_t                *draw_buffs[3]; /* Display draw buffers */
     lv_display_t              *disp_drv;      /* LVGL display driver */
@@ -71,6 +72,7 @@ static bool lvgl_port_flush_panel_ready_callback(esp_lcd_panel_handle_t panel_io
 #endif
 static void lvgl_port_flush_callback(lv_display_t *drv, const lv_area_t *area, uint8_t *color_map);
 static void lvgl_port_flush_wait_callback(lv_display_t *drv);
+static void lvgl_port_flush_wait_smphr_callback(lv_display_t *drv);
 static void lvgl_port_disp_size_update_callback(lv_event_t *e);
 static void lvgl_port_disp_rotation_update(lvgl_port_display_ctx_t *disp_ctx);
 static void lvgl_port_display_invalidate_callback(lv_event_t *e);
@@ -82,7 +84,14 @@ static void lvgl_port_display_invalidate_callback(lv_event_t *e);
 lv_display_t *lvgl_port_add_disp(const lvgl_port_display_cfg_t *disp_cfg)
 {
     lvgl_port_lock(0);
-    lv_disp_t *disp = lvgl_port_add_disp_priv(disp_cfg, NULL);
+    const lvgl_port_disp_priv_cfg_t priv_cfg = {
+#if LVGL_PORT_HANDLE_FLUSH_READY
+        .use_flush_smphr = 1, /* Always use semaphore for now */
+#else
+        .use_flush_smphr = 0, /* Don't need semaphore if not handling flush ready */
+#endif
+    };
+    lv_disp_t *disp = lvgl_port_add_disp_priv(disp_cfg, &priv_cfg);
 
     if (disp != NULL) {
         lvgl_port_display_ctx_t *disp_ctx = (lvgl_port_display_ctx_t *)lv_display_get_user_data(disp);
@@ -97,6 +106,11 @@ lv_display_t *lvgl_port_add_disp(const lvgl_port_display_cfg_t *disp_cfg)
         };
         /* Register done callback */
         esp_lcd_panel_io_register_event_callbacks(disp_ctx->io_handle, &cbs, disp);
+
+        /* Register wait callback if using semaphore */
+        if (disp_ctx->flush_smphr) {
+            lv_display_set_flush_wait_cb(disp, lvgl_port_flush_wait_smphr_callback);
+        }
 #endif
 
         /* Apply rotation from initial display configuration */
@@ -110,7 +124,10 @@ lv_display_t *lvgl_port_add_disp(const lvgl_port_display_cfg_t *disp_cfg)
 lv_display_t *lvgl_port_add_disp_dsi(const lvgl_port_display_cfg_t *disp_cfg, const lvgl_port_display_dsi_cfg_t *dsi_cfg)
 {
     lvgl_port_lock(0);
-    lv_disp_t *disp = lvgl_port_add_disp_priv(disp_cfg, NULL);
+    const lvgl_port_disp_priv_cfg_t priv_cfg = {
+        .use_flush_smphr = 1, /* Always use semaphore for now */
+    };
+    lv_disp_t *disp = lvgl_port_add_disp_priv(disp_cfg, &priv_cfg);
 
     if (disp != NULL) {
         lvgl_port_display_ctx_t *disp_ctx = (lvgl_port_display_ctx_t *)lv_display_get_user_data(disp);
@@ -123,6 +140,11 @@ lv_display_t *lvgl_port_add_disp_dsi(const lvgl_port_display_cfg_t *disp_cfg, co
         };
         /* Register done callback */
         esp_lcd_dpi_panel_register_event_callbacks(disp_ctx->panel_handle, &cbs, disp);
+
+        /* Register wait callback if using semaphore */
+        if (disp_ctx->flush_smphr) {
+            lv_display_set_flush_wait_cb(disp, lvgl_port_flush_wait_smphr_callback);
+        }
 
         /* Apply rotation from initial display configuration */
         lvgl_port_disp_rotation_update(disp_ctx);
@@ -203,6 +225,9 @@ esp_err_t lvgl_port_remove_disp(lv_display_t *disp)
 
     if (disp_ctx->draw_buffs[2]) {
         free(disp_ctx->draw_buffs[2]);
+    }
+    if (disp_ctx->flush_smphr) {
+        vSemaphoreDelete(disp_ctx->flush_smphr);
     }
 
     free(disp_ctx);
@@ -299,6 +324,12 @@ static lv_display_t *lvgl_port_add_disp_priv(const lvgl_port_display_cfg_t *disp
         disp_ctx->draw_buffs[1] = buf2;
     }
 
+    /* Use semaphore to signal LCD panel flush done */
+    if (priv_cfg && priv_cfg->use_flush_smphr) {
+        disp_ctx->flush_smphr = xSemaphoreCreateBinary();
+        ESP_GOTO_ON_FALSE(disp_ctx->flush_smphr, ESP_ERR_NO_MEM, err, TAG, "Create flush semaphore fail!");
+    }
+
     disp = lv_display_create(disp_cfg->hres, disp_cfg->vres);
 
     /* Monochrome display settings */
@@ -351,6 +382,9 @@ err:
         if (disp_ctx->draw_buffs[2]) {
             free(disp_ctx->draw_buffs[2]);
         }
+        if (disp_ctx->flush_smphr) {
+            vSemaphoreDelete(disp_ctx->flush_smphr);
+        }
         if (disp_ctx) {
             free(disp_ctx);
         }
@@ -362,19 +396,47 @@ err:
 #if LVGL_PORT_HANDLE_FLUSH_READY
 static bool lvgl_port_flush_io_ready_callback(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel_io_event_data_t *edata, void *user_ctx)
 {
+    BaseType_t need_yield = pdFALSE;
+
     lv_display_t *disp_drv = (lv_display_t *)user_ctx;
     assert(disp_drv != NULL);
-    lv_disp_flush_ready(disp_drv);
-    return false;
+    lvgl_port_display_ctx_t *disp_ctx = lv_display_get_user_data(disp_drv);
+    assert(disp_ctx != NULL);
+
+    if (disp_ctx->flush_smphr) {
+        if (xPortInIsrContext() == pdTRUE) {
+            need_yield = xSemaphoreGiveFromISR(disp_ctx->flush_smphr, &need_yield);
+        } else {
+            xSemaphoreGive(disp_ctx->flush_smphr);
+        }
+    } else {
+        lv_disp_flush_ready(disp_drv);
+    }
+
+    return (need_yield == pdTRUE);
 }
 
 #if (CONFIG_IDF_TARGET_ESP32P4 && ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 3, 0))
 static bool lvgl_port_flush_panel_ready_callback(esp_lcd_panel_handle_t panel_io, esp_lcd_dpi_panel_event_data_t *edata, void *user_ctx)
 {
+    BaseType_t need_yield = pdFALSE;
+
     lv_display_t *disp_drv = (lv_display_t *)user_ctx;
     assert(disp_drv != NULL);
-    lv_disp_flush_ready(disp_drv);
-    return false;
+    lvgl_port_display_ctx_t *disp_ctx = lv_display_get_user_data(disp_drv);
+    assert(disp_ctx != NULL);
+
+    if (disp_ctx->flush_smphr) {
+        if (xPortInIsrContext() == pdTRUE) {
+            need_yield = xSemaphoreGiveFromISR(disp_ctx->flush_smphr, &need_yield);
+        } else {
+            xSemaphoreGive(disp_ctx->flush_smphr);
+        }
+    } else {
+        lv_disp_flush_ready(disp_drv);
+    }
+
+    return (need_yield == pdTRUE);
 }
 #endif
 
@@ -481,6 +543,16 @@ static void lvgl_port_flush_wait_callback(lv_display_t *drv)
         ulTaskNotifyValueClear(NULL, ULONG_MAX);
         ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
     }
+}
+
+static void lvgl_port_flush_wait_smphr_callback(lv_display_t *drv)
+{
+    assert(drv != NULL);
+
+    lvgl_port_display_ctx_t *disp_ctx = lv_display_get_user_data(drv);
+    assert(disp_ctx != NULL);
+    assert(disp_ctx->flush_smphr != NULL); /* This callback should only be used with semaphore */
+    xSemaphoreTake(disp_ctx->flush_smphr, portMAX_DELAY);
 }
 
 static void lvgl_port_flush_callback(lv_display_t *drv, const lv_area_t *area, uint8_t *color_map)
