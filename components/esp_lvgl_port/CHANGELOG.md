@@ -6,6 +6,9 @@
 - Added display flush wait callback support
 - Added support for buffered LCD panel (esp_lcd_buffered)
 
+### Fixes
+- Fixed LVGL9 task delay calculation
+
 ## 2.6.2
 
 - Changed minimum IDF version to IDF5.1
