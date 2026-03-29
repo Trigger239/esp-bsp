@@ -29,6 +29,7 @@ typedef enum {
  */
 typedef struct {
     unsigned int avoid_tearing: 1;    /*!< Use internal RGB buffers as a LVGL draw buffers to avoid tearing effect */
+    unsigned int use_flush_smphr: 1;  /*!< Use semaphore to signal LCD panel flush done */
 } lvgl_port_disp_priv_cfg_t;
 
 /**
