@@ -20,6 +20,11 @@
 #include "esp_lvgl_port_compatibility.h"
 #endif
 
+#if __has_include ("esp_lcd_panel_buffered.h")
+#include "esp_lcd_panel_buffered.h"
+#define ESP_LVGL_PORT_USE_LCD_BUFFERED 1
+#endif
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -79,7 +84,7 @@ typedef struct {
 typedef struct {
     struct {
         unsigned int bb_mode: 1;        /*!< 1: Use bounce buffer mode */
-unsigned int avoid_tearing:
+        unsigned int avoid_tearing:
         1;  /*!< 1: Use internal RGB buffers as a LVGL draw buffers to avoid tearing effect, enabling this option requires over two LCD buffers and may reduce the frame rate */
     } flags;
 } lvgl_port_display_rgb_cfg_t;
@@ -89,10 +94,19 @@ unsigned int avoid_tearing:
  */
 typedef struct {
     struct {
-unsigned int avoid_tearing:
+        unsigned int avoid_tearing:
         1;  /*!< 1: Use internal MIPI-DSI buffers as a LVGL draw buffers to avoid tearing effect, enabling this option requires over two LCD buffers and may reduce the frame rate */
     } flags;
 } lvgl_port_display_dsi_cfg_t;
+
+#if ESP_LVGL_PORT_USE_LCD_BUFFERED
+/**
+ * @brief Configuration Buffered display structure
+ */
+typedef struct {
+    esp_lcd_buffered_panel_sync_wait_cb_t wait_sync; /*!< Sync Wait callback function (use to avoid tearing) */
+} lvgl_port_display_buffered_cfg_t;
+#endif
 
 /**
  * @brief Add I2C/SPI/I8080 display handling to LVGL
@@ -127,6 +141,20 @@ lv_display_t *lvgl_port_add_disp_dsi(const lvgl_port_display_cfg_t *disp_cfg,
  */
 lv_display_t *lvgl_port_add_disp_rgb(const lvgl_port_display_cfg_t *disp_cfg,
                                      const lvgl_port_display_rgb_cfg_t *rgb_cfg);
+
+#if ESP_LVGL_PORT_USE_LCD_BUFFERED
+/**
+ * @brief Add Buffered display handling to LVGL
+ *
+ * @note Allocated memory in this function is not free in deinit. You must call lvgl_port_remove_disp for free all memory!
+ *
+ * @param disp_cfg Display configuration structure
+ * @param buffered_cfg Buffered display specific configuration structure
+ * @return Pointer to LVGL display or NULL when error occurred
+ */
+lv_display_t *lvgl_port_add_disp_buffered(const lvgl_port_display_cfg_t *disp_cfg,
+        const lvgl_port_display_buffered_cfg_t *buffered_cfg);
+#endif
 
 /**
  * @brief Remove display handling from LVGL

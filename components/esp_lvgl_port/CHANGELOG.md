@@ -4,6 +4,7 @@
 
 ### Features
 - Added display flush wait callback support
+- Added support for buffered LCD panel (esp_lcd_buffered)
 
 ## 2.9.0
 
