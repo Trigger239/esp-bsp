@@ -9,6 +9,7 @@
 
 ### Fixes
 - Fixed LVGL9 task delay calculation
+- Workaround for CPU usage measurement for LVGL 9.3 and above
 
 ## 2.6.2
 
