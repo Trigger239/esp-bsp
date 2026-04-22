@@ -113,6 +113,14 @@ if("trigger239__esp_lcd_buffered" IN_LIST build_components)
     list(APPEND ADD_LIBS idf::trigger239__esp_lcd_buffered)
 endif()
 
+# A workaround to get correct CPU idle percentage in LVGL >= 9.3.0
+# FreeRTOS task switching hooks are configured as described here: https://www.robopenguins.com/making-a-tracing-profiler-pt3/#mabutrace
+if((lvgl_ver VERSION_GREATER_EQUAL "9.3.0") AND CONFIG_LV_USE_PERF_MONITOR)
+    list(APPEND ADD_SRCS "${PORT_PATH}/esp_lvgl_port_sysmon.c")
+    idf_build_set_property(COMPILE_OPTIONS "$<$<COMPILE_LANGUAGE:C,CXX>:-include${CMAKE_CURRENT_SOURCE_DIR}/priv_include/esp_lvgl_port_hooks.h>" APPEND)
+    idf_build_set_property(COMPILE_OPTIONS "$<$<COMPILE_LANGUAGE:C,CXX>:-DLV_SYSMON_GET_IDLE=lvgl_port_get_idle_percent>" APPEND)
+endif()
+
 # Include SIMD assembly source code for rendering, only for LVGL_version >= 9.1.0 and only for esp32 and esp32s3
 if((lvgl_ver VERSION_GREATER_EQUAL "9.1.0"))
     if(CONFIG_IDF_TARGET_ESP32 OR CONFIG_IDF_TARGET_ESP32S3)
