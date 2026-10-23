@@ -5,6 +5,7 @@
 ### Features
 - Added display flush wait callback support
 - Added support for buffered LCD panel (esp_lcd_buffered)
+- Added SIMD support also for LVGL 9.2 and above
 
 ### Fixes
 - Fixed LVGL9 task delay calculation
